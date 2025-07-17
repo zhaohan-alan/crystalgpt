@@ -1,0 +1,13 @@
+python main.py \
+    --batchsize 100 \
+    --epochs 3800 \
+    --train_path data/train.csv \
+    --valid_path data/val.csv \
+    --test_path data/test.csv \
+    --folder ./data/ \
+    --num_io_process 40 \
+    --model_size 32 \
+    --dropout_rate 0.5 \
+    --attn_dropout 0.5 \
+    --val_interval 100 \
+    --Kl 16 | tee train.log
