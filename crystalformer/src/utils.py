@@ -189,6 +189,78 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1):
     
     return G, L, XYZ, A, W
 
+def GLXYZAW_from_file_with_comp(csv_file, atom_types, wyck_types, n_max, num_workers=1):
+    """
+    Read cif strings from csv file and convert them to G, L, XYZ, A, W, comp_features
+    Note that cif strings must be in the column 'cif'
+    This function expects the csv file to have composition features starting from column 9 (index 9)
+
+    Args:
+      csv_file: csv file containing cif strings and composition features
+      atom_types: number of atom types
+      wyck_types: number of wyckoff types
+      n_max: maximum number of atoms in the unit cell
+      num_workers: number of workers for multiprocessing
+
+    Returns:
+      G: space group number
+      L: lattice parameters
+      XYZ: fractional coordinates
+      A: atom types
+      W: wyckoff letters
+      comp_features: composition features (256-dimensional)
+    """
+    
+    # Read data from CSV
+    data = pd.read_csv(csv_file)
+    
+    # Extract cif strings
+    try: 
+        cif_strings = data['cif']
+    except: 
+        cif_strings = data['structure']
+    
+    # Extract composition features (from column 9 onwards)
+    comp_feature_cols = data.columns[9:]  # Skip first 9 columns (original train.csv columns)
+    comp_features = data[comp_feature_cols].values  # Convert to numpy array
+    
+    print(f"Found {len(comp_feature_cols)} composition features")
+    print(f"Composition features shape: {comp_features.shape}")
+    print(f"First 5 feature names: {list(comp_feature_cols[:5])}")
+    
+    # Process CIF strings to get G, L, XYZ, A, W (same as original function)
+    p = multiprocessing.Pool(num_workers)
+    partial_process_one = partial(process_one, atom_types=atom_types, wyck_types=wyck_types, n_max=n_max)
+    results = p.map_async(partial_process_one, cif_strings).get()
+    p.close()
+    p.join()
+
+    G, L, XYZ, A, W = zip(*results)
+
+    G = jnp.array(G) 
+    A = jnp.array(A).reshape(-1, n_max)
+    W = jnp.array(W).reshape(-1, n_max)
+    XYZ = jnp.array(XYZ).reshape(-1, n_max, 3)
+    L = jnp.array(L).reshape(-1, 6)
+
+    A, XYZ = sort_atoms(W, A, XYZ)
+    
+    # Convert composition features to JAX array
+    comp_features = jnp.array(comp_features)
+    
+    # Check shapes consistency
+    assert G.shape[0] == comp_features.shape[0], f"Mismatch: G has {G.shape[0]} samples, comp_features has {comp_features.shape[0]} samples"
+    
+    print(f"Final data shapes:")
+    print(f"G: {G.shape}")
+    print(f"L: {L.shape}")
+    print(f"XYZ: {XYZ.shape}")
+    print(f"A: {A.shape}")
+    print(f"W: {W.shape}")
+    print(f"comp_features: {comp_features.shape}")
+    
+    return G, L, XYZ, A, W, comp_features
+
 def GLXA_to_structure_single(G, L, X, A):
     """
     Convert G, L, X, A to pymatgen structure. Do not use this function due to the bug in pymatgen.
