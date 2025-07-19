@@ -1,1 +1,14 @@
+#!/bin/bash
 python ./main.py --optimizer none --test_path data/test.csv --restore_path data/adam_bs_100_lr_0.0001_decay_0_clip_1_A_119_W_28_N_21_a_1_w_1_l_1_Nf_5_Kx_16_Kl_16_h0_256_l_16_H_16_k_64_m_32_e_32_drop_0.5_0.5 --spacegroup 225 --num_samples 1000  --batchsize 1000 --temperature 1.0 --model_size 32 --Kl 16
+# 更新后的推理脚本，支持带composition features的模型
+python ./main.py --optimizer none \
+    --test_path data/test_comp_cleaned.csv \
+    --restore_path data/adam_bs_80_lr_0.0001_decay_0_clip_1_A_119_W_28_N_21_a_1_w_1_l_1_Nf_5_Kx_16_Kl_16_h0_256_l_16_H_16_k_64_m_32_e_32_drop_0.5_0.5 \
+    --spacegroup 225 \
+    --num_samples 100 \
+    --batchsize 1000 \
+    --temperature 1.0 \
+    --model_size 32 \
+    --Kl 16 \
+    --dropout_rate 0.5 \
+    --attn_dropout 0.5

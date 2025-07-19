@@ -17,15 +17,15 @@ def project_xyz(g, w, x, idx):
     x -= jnp.floor(x)
     return x 
 
-@partial(jax.vmap, in_axes=(None, None, None, 0, 0, 0, 0, 0), out_axes=0) # batch 
-def inference(model, params, g, W, A, X, Y, Z):
+@partial(jax.vmap, in_axes=(None, None, None, 0, 0, 0, 0, 0, 0), out_axes=0) # batch 
+def inference(model, params, g, W, A, X, Y, Z, comp_features):
     XYZ = jnp.concatenate([X[:, None],
                            Y[:, None],
                            Z[:, None]
                            ], 
                            axis=-1)
     M = mult_table[g-1, W]  
-    return model(params, None, g, XYZ, A, W, M, False)
+    return model(params, None, g, XYZ, A, W, M, comp_features, False)
 
 def sample_top_p(key, logits, p, temperature):
     '''
@@ -60,13 +60,17 @@ def sample_x(key, h_x, Kx, top_p, temperature, batchsize):
     return key, x 
 
 @partial(jax.jit, static_argnums=(1, 3, 4, 5, 6, 7, 8, 9, 12, 14))
-def sample_crystal(key, transformer, params, n_max, batchsize, atom_types, wyck_types, Kx, Kl, g, w_mask, atom_mask, top_p, temperature, T1, constraints):
+def sample_crystal(key, transformer, params, n_max, batchsize, atom_types, wyck_types, Kx, Kl, g, w_mask, atom_mask, top_p, temperature, T1, constraints, comp_features=None):
+    
+    # If comp_features is not provided, create default zero features
+    if comp_features is None:
+        comp_features = jnp.zeros((batchsize, 256))
        
     def body_fn(i, state):
         key, W, A, X, Y, Z, L = state 
 
         # (1) W 
-        w_logit = inference(transformer, params, g, W, A, X, Y, Z)[:, 5*i] # (batchsize, output_size)
+        w_logit = inference(transformer, params, g, W, A, X, Y, Z, comp_features)[:, 5*i] # (batchsize, output_size)
         w_logit = w_logit[:, :wyck_types]
     
         key, subkey = jax.random.split(key)
@@ -77,7 +81,7 @@ def sample_crystal(key, transformer, params, n_max, batchsize, atom_types, wyck_
         W = W.at[:, i].set(w)
 
         # (2) A
-        h_al = inference(transformer, params, g, W, A, X, Y, Z)[:, 5*i+1] # (batchsize, output_size)
+        h_al = inference(transformer, params, g, W, A, X, Y, Z, comp_features)[:, 5*i+1] # (batchsize, output_size)
         a_logit = h_al[:, :atom_types]
     
         key, subkey = jax.random.split(key)
@@ -97,7 +101,7 @@ def sample_crystal(key, transformer, params, n_max, batchsize, atom_types, wyck_
         L = L.at[:, i].set(lattice_params)
     
         # (3) X
-        h_x = inference(transformer, params, g, W, A, X, Y, Z)[:, 5*i+2] # (batchsize, output_size)
+        h_x = inference(transformer, params, g, W, A, X, Y, Z, comp_features)[:, 5*i+2] # (batchsize, output_size)
         key, x = sample_x(key, h_x, Kx, top_p, temperature, batchsize)
     
         # project to the first WP
@@ -110,7 +114,7 @@ def sample_crystal(key, transformer, params, n_max, batchsize, atom_types, wyck_
         X = X.at[:, i].set(x)
     
         # (4) Y
-        h_y = inference(transformer, params, g, W, A, X, Y, Z)[:, 5*i+3] # (batchsize, output_size)
+        h_y = inference(transformer, params, g, W, A, X, Y, Z, comp_features)[:, 5*i+3] # (batchsize, output_size)
         key, y = sample_x(key, h_y, Kx, top_p, temperature, batchsize)
         
         # project to the first WP
@@ -123,7 +127,7 @@ def sample_crystal(key, transformer, params, n_max, batchsize, atom_types, wyck_
         Y = Y.at[:, i].set(y)
     
         # (5) Z
-        h_z = inference(transformer, params, g, W, A, X, Y, Z)[:, 5*i+4] # (batchsize, output_size)
+        h_z = inference(transformer, params, g, W, A, X, Y, Z, comp_features)[:, 5*i+4] # (batchsize, output_size)
         key, z = sample_x(key, h_z, Kx, top_p, temperature, batchsize)
         
         # project to the first WP
@@ -191,7 +195,10 @@ def make_update_lattice(transformer, params, atom_types, Kl, top_p, temperature)
         #num_atoms = jnp.sum(M)
         batchsize = XYZ.shape[0]
 
-        h = jax.vmap(transformer, in_axes=(None, None, 0, 0, 0, 0, 0, None))(params, key, G, XYZ, A, W, M, False)
+        # For update_lattice, we need comp_features. Since this is called during sampling,
+        # we'll use zero features as default
+        comp_features = jnp.zeros((batchsize, 256))
+        h = jax.vmap(transformer, in_axes=(None, None, 0, 0, 0, 0, 0, 0, None))(params, key, G, XYZ, A, W, M, comp_features, False)
 
         l_logit, mu, sigma = jax.vmap(lambda h, num_site: jnp.split(h[1::5][num_site,
                                                                     atom_types:atom_types+Kl+2*6*Kl], [Kl, Kl+Kl*6], axis=-1),

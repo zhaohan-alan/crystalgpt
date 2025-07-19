@@ -7,9 +7,9 @@ import multiprocessing
 import math
 import pandas as pd
 import numpy as np 
-np.set_printoptions(threshold=np.inf)
+np.set_printoptions(threshold=None)
 
-from crystalformer.src.utils import GLXYZAW_from_file, letter_to_number
+from crystalformer.src.utils import GLXYZAW_from_file, GLXYZAW_from_file_with_comp, letter_to_number
 from crystalformer.src.elements import element_dict, element_list
 from crystalformer.src.transformer import make_transformer  
 from crystalformer.src.train import train
@@ -95,8 +95,8 @@ if args.num_io_process > num_cpu:
 
 ################### Data #############################
 if args.optimizer != "none":
-    train_data = GLXYZAW_from_file(args.train_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
-    valid_data = GLXYZAW_from_file(args.valid_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
+    train_data = GLXYZAW_from_file_with_comp(args.train_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
+    valid_data = GLXYZAW_from_file_with_comp(args.valid_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
 else:
     assert (args.spacegroup is not None) # for inference we need to specify space group
     # test_data = GLXYZAW_from_file(args.test_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
@@ -258,7 +258,9 @@ else:
         end_idx = min(start_idx + args.batchsize, args.num_samples)
         n_sample = end_idx - start_idx
         key, subkey = jax.random.split(key)
-        XYZ, A, W, M, L = sample_crystal(subkey, transformer, params, args.n_max, n_sample, args.atom_types, args.wyck_types, args.Kx, args.Kl, args.spacegroup, w_mask, atom_mask, args.top_p, args.temperature, T1, constraints)
+        # For sampling, we use zero composition features as default
+        comp_features = jnp.zeros((n_sample, 256))
+        XYZ, A, W, M, L = sample_crystal(subkey, transformer, params, args.n_max, n_sample, args.atom_types, args.wyck_types, args.Kx, args.Kl, args.spacegroup, w_mask, atom_mask, args.top_p, args.temperature, T1, constraints, comp_features)
 
         G = args.spacegroup * jnp.ones((n_sample), dtype=int)
         if args.mcmc:
@@ -296,7 +298,7 @@ else:
         L = jnp.concatenate([length, angle], axis=-1)
 
         # G = args.spacegroup * jnp.ones((n_sample), dtype=int)
-        logp_w, logp_xyz, logp_a, logp_l = jax.jit(logp_fn, static_argnums=7)(params, key, G, L, XYZ, A, W, False)
+        logp_w, logp_xyz, logp_a, logp_l = jax.jit(logp_fn, static_argnums=8)(params, key, G, L, XYZ, A, W, comp_features, False)
 
         data['logp_w'] = np.array(logp_w).tolist()
         data['logp_xyz'] = np.array(logp_xyz).tolist()

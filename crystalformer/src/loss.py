@@ -8,7 +8,7 @@ from crystalformer.src.lattice import make_lattice_mask
 from crystalformer.src.wyckoff import mult_table, fc_mask_table
 
 
-def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0, lamb_w=1.0, lamb_l=1.0):
+def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0, lamb_w=1.0, lamb_l=1.0, sigmamin=1e-3):
     """
     Args:
       n_max: maximum number of atoms in the unit cell
@@ -39,27 +39,40 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
 
         return logp_x
 
-    @partial(jax.vmap, in_axes=(None, None, 0, 0, 0, 0, 0, None), out_axes=0) # batch 
-    def logp_fn(params, key, G, L, XYZ, A, W, is_train):
+    @partial(jax.vmap, in_axes=(None, None, 0, 0, 0, 0, 0, 0, None), out_axes=0) # batch 
+    def logp_fn(params, key, G, L, XYZ, A, W, comp_features, is_train):
         '''
         G: scalar 
         L: (6,) [a, b, c, alpha, beta, gamma] 
         XYZ: (n_max, 3)
         A: (n_max,)
         W: (n_max,)
+        comp_features: (256,) composition features
         '''
 
         num_sites = jnp.sum(A!=0)
         M = mult_table[G-1, W]  # (n_max,) multplicities
         #num_atoms = jnp.sum(M)
 
-        h = transformer(params, key, G, XYZ, A, W, M, is_train) # (5*n_max+1, ...)
-        w_logit = h[0::5, :wyck_types] # (n_max+1, wyck_types) 
-        w_logit = w_logit[:-1] # (n_max, wyck_types)
-        a_logit = h[1::5, :atom_types] 
-        h_x = h[2::5, :coord_types]
-        h_y = h[3::5, :coord_types]
-        h_z = h[4::5, :coord_types]
+        h = transformer(params, key, G, XYZ, A, W, M, comp_features, is_train) # (5*n_max+2, ...)
+        
+        # New sequence structure: [h0_token, comp_token, W1, A1, X1, Y1, Z1, W2, A2, X2, Y2, Z2, ...]
+        # h0_token: h[0]
+        # comp_token: h[1] (ignore)
+        # W tokens: h[2::5] (starting from index 2, every 5th element)
+        # A tokens: h[3::5] (starting from index 3, every 5th element)
+        # X tokens: h[4::5] (starting from index 4, every 5th element)
+        # Y tokens: h[5::5] (starting from index 5, every 5th element)
+        # Z tokens: h[6::5] (starting from index 6, every 5th element)
+        
+        w_logit = h[2::5, :wyck_types] # (n_max, wyck_types)
+        a_logit = h[3::5, :atom_types] # (n_max, atom_types)
+        h_x = h[4::5, :coord_types]    # (n_max, coord_types)
+        h_y = h[5::5, :coord_types]    # (n_max, coord_types)
+        h_z = h[6::5, :coord_types]    # (n_max, coord_types)
+        
+        # For lattice parameters, we need the full A token (not just atom_types part)
+        a_tokens_full = h[3::5]  # (n_max, output_size)
 
         logp_w = jnp.sum(w_logit[jnp.arange(n_max), W.astype(int)])
         logp_a = jnp.sum(a_logit[jnp.arange(n_max), A.astype(int)])
@@ -73,10 +86,19 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
 
         logp_xyz = logp_x + logp_y + logp_z
 
-        l_logit, mu, sigma = jnp.split(h[1::5][num_sites, 
-                                               atom_types:atom_types+Kl+2*6*Kl], [Kl, Kl+Kl*6], axis=-1)
-        mu = mu.reshape(Kl, 6)
-        sigma = sigma.reshape(Kl, 6)
+        # For lattice parameters, we use the full A token at the num_sites position
+        # The A token for the num_sites-th atom contains lattice parameters after the atom types
+        a_logit_for_lattice = a_tokens_full[num_sites, atom_types:atom_types+Kl+2*6*Kl]
+        lattice_data = jnp.split(a_logit_for_lattice, [Kl, Kl+Kl*6], axis=-1)
+        l_logit = lattice_data[0]
+        mu = lattice_data[1].reshape(Kl, 6)
+        sigma = lattice_data[2].reshape(Kl, 6)
+        
+        # normalization
+        l_logit -= jax.scipy.special.logsumexp(l_logit)
+        # ensure positivity
+        sigma = jax.nn.softplus(sigma) + sigmamin
+        
         logp_l = jax.vmap(jax.scipy.stats.norm.logpdf, (None, 0, 0))(L,mu,sigma) #(Kl, 6)
         logp_l = jax.scipy.special.logsumexp(l_logit[:, None] + logp_l, axis=0) # (6,)
         logp_l = jnp.sum(jnp.where((lattice_mask[G-1]>0), logp_l, jnp.zeros_like(logp_l)))
@@ -87,8 +109,8 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
     # This is a useful heuristic for transformers.
     # @partial(jax.checkpoint, policy=jax.checkpoint_policies.offload_dot_with_no_batch_dims, static_argnums=(7,))
     # @partial(jax.checkpoint, policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable, static_argnums=(7,))
-    def loss_fn(params, key, G, L, XYZ, A, W, is_train):
-        logp_w, logp_xyz, logp_a, logp_l = logp_fn(params, key, G, L, XYZ, A, W, is_train)
+    def loss_fn(params, key, G, L, XYZ, A, W, comp_features, is_train):
+        logp_w, logp_xyz, logp_a, logp_l = logp_fn(params, key, G, L, XYZ, A, W, comp_features, is_train)
         loss_w = -jnp.mean(logp_w)
         loss_xyz = -jnp.mean(logp_xyz)
         loss_a = -jnp.mean(logp_a)
@@ -99,7 +121,7 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
     return loss_fn, logp_fn
 
 if __name__=='__main__':
-    from utils import GLXYZAW_from_file
+    from utils import GLXYZAW_from_file_with_comp
     from transformer import make_transformer
     atom_types = 119
     n_max = 20
@@ -110,7 +132,7 @@ if __name__=='__main__':
     dropout_rate = 0.1 
 
     csv_file = '../data/mini.csv'
-    G, L, XYZ, A, W = GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max)
+    G, L, XYZ, A, W, comp_features = GLXYZAW_from_file_with_comp(csv_file, atom_types, wyck_types, n_max)
 
     key = jax.random.PRNGKey(42)
 
@@ -118,8 +140,8 @@ if __name__=='__main__':
  
     loss_fn, _ = make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer)
     
-    value = jax.jit(loss_fn, static_argnums=7)(params, key, G[:1], L[:1], XYZ[:1], A[:1], W[:1], True)
+    value = jax.jit(loss_fn, static_argnums=8)(params, key, G[:1], L[:1], XYZ[:1], A[:1], W[:1], comp_features[:1], True)
     print (value)
 
-    value = jax.jit(loss_fn, static_argnums=7)(params, key, G[:1], L[:1], XYZ[:1]+1.0, A[:1], W[:1], True)
+    value = jax.jit(loss_fn, static_argnums=8)(params, key, G[:1], L[:1], XYZ[:1]+1.0, A[:1], W[:1], comp_features[:1], True)
     print (value)

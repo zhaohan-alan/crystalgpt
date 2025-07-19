@@ -41,9 +41,16 @@ def shuffle(key, data):
     """
     shuffle data along batch dimension
     """
-    G, L, XYZ, A, W = data
-    idx = jax.random.permutation(key, jnp.arange(len(L)))
-    return G[idx], L[idx], XYZ[idx], A[idx], W[idx]
+    if len(data) == 5:
+        # Original format: (G, L, XYZ, A, W)
+        G, L, XYZ, A, W = data
+        idx = jax.random.permutation(key, jnp.arange(len(L)))
+        return G[idx], L[idx], XYZ[idx], A[idx], W[idx]
+    else:
+        # New format with composition features: (G, L, XYZ, A, W, comp_features)
+        G, L, XYZ, A, W, comp_features = data
+        idx = jax.random.permutation(key, jnp.arange(len(L)))
+        return G[idx], L[idx], XYZ[idx], A[idx], W[idx], comp_features[idx]
     
 def process_one(cif, atom_types, wyck_types, n_max, tol=0.01):
     """
@@ -189,7 +196,7 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1):
     
     return G, L, XYZ, A, W
 
-def GLXYZAW_from_file_with_comp(csv_file, atom_types, wyck_types, n_max, num_workers=1):
+def GLXYZAW_from_file_with_comp(csv_file, atom_types, wyck_types, n_max, num_workers=1, max_samples=None):
     """
     Read cif strings from csv file and convert them to G, L, XYZ, A, W, comp_features
     Note that cif strings must be in the column 'cif'
@@ -201,6 +208,7 @@ def GLXYZAW_from_file_with_comp(csv_file, atom_types, wyck_types, n_max, num_wor
       wyck_types: number of wyckoff types
       n_max: maximum number of atoms in the unit cell
       num_workers: number of workers for multiprocessing
+      max_samples: maximum number of samples to read (None for all)
 
     Returns:
       G: space group number
@@ -211,8 +219,12 @@ def GLXYZAW_from_file_with_comp(csv_file, atom_types, wyck_types, n_max, num_wor
       comp_features: composition features (256-dimensional)
     """
     
-    # Read data from CSV
-    data = pd.read_csv(csv_file)
+    # Read data from CSV with optional row limit
+    if max_samples is not None:
+        data = pd.read_csv(csv_file, nrows=max_samples)
+        print(f"限制读取前 {max_samples} 行数据")
+    else:
+        data = pd.read_csv(csv_file)
     
     # Extract cif strings
     try: 

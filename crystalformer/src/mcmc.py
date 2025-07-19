@@ -61,7 +61,9 @@ def make_mcmc_step(params, n_max, atom_types, atom_mask=None, constraints=None):
                 XYZ_proposal = _XYZ
                 x_proposal = (G, L, XYZ_proposal, A_proposal, W)
 
-                logp_w, logp_xyz, logp_a, _ = logp_fn(params, key_logp, *x_proposal, False)
+                # For MCMC, we use zero composition features as default
+                comp_features = jnp.zeros((G.shape[0], 256))
+                logp_w, logp_xyz, logp_a, _ = logp_fn(params, key_logp, *x_proposal, comp_features, False)
                 logp_proposal = logp_w + logp_xyz + logp_a
 
                 ratio = jnp.exp((logp_proposal - logp))
@@ -91,7 +93,9 @@ def make_mcmc_step(params, n_max, atom_types, atom_mask=None, constraints=None):
             return x, logp, key, num_accepts
 
         key, subkey = jax.random.split(key)
-        logp_w, logp_xyz, logp_a, _ = logp_fn(params, subkey, *x_init, False)
+        # For MCMC initialization, we use zero composition features as default
+        comp_features = jnp.zeros((x_init[0].shape[0], 256))
+        logp_w, logp_xyz, logp_a, _ = logp_fn(params, subkey, *x_init, comp_features, False)
         logp_init = logp_w + logp_xyz + logp_a
         jax.debug.print("logp {x} {y}", 
                         x=logp_init.mean(),
@@ -134,9 +138,11 @@ if __name__  == "__main__":
     mc_width = 0.1
     x_init = (G[:5], L[:5], XYZ[:5], A[:5], W[:5])
 
-    value = jax.jit(logp_fn, static_argnums=7)(params, key, *x_init, False)
+    # For MCMC test, we use zero composition features as default
+    comp_features = jnp.zeros((x_init[0].shape[0], 256))
+    value = jax.jit(logp_fn, static_argnums=8)(params, key, *x_init, comp_features, False)
 
-    jnp.set_printoptions(threshold=jnp.inf)
+    jnp.set_printoptions(threshold=None)
     mcmc = make_mcmc_step(params, n_max=n_max, atom_types=atom_types)
 
     for i in range(5):
