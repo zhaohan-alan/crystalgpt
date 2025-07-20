@@ -19,6 +19,52 @@ import crystalformer.src.checkpoint as checkpoint
 from crystalformer.src.wyckoff import mult_table
 from crystalformer.src.mcmc import make_mcmc_step
 
+
+def generate_composition_features(elements, comp_feature_dim=256, csv_path=None, data_index=0):
+    """
+    Load composition features from CSV file or mock them
+    
+    Args:
+        elements: list of element symbols (e.g., ['Ga', 'Te']) 
+        comp_feature_dim: dimension of composition features
+        csv_path: path to CSV file containing composition features
+        data_index: which row to read from CSV (0-indexed)
+    
+    Returns:
+        tuple: (composition features array of shape (comp_feature_dim,), mp_id string)
+    """
+    if csv_path is not None and os.path.exists(csv_path):
+        print(f"Loading composition features from {csv_path}, row {data_index}")
+        try:
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+            
+            if data_index >= len(df):
+                print(f"Warning: data_index {data_index} >= dataset size {len(df)}, using last row")
+                data_index = len(df) - 1
+            
+            # 从第10列开始读取256维composition features
+            comp_features = df.iloc[data_index, 9:9+comp_feature_dim].values
+            comp_features = np.array(comp_features, dtype=np.float32)
+            
+            # 读取mp-id (第2列, 索引为1)
+            mp_id = df.iloc[data_index, 1]
+            
+            print(f"Loaded composition features shape: {comp_features.shape}")
+            print(f"Composition features range: [{comp_features.min():.4f}, {comp_features.max():.4f}]")
+            print(f"Loaded mp-id: {mp_id}")
+            
+            return jnp.array(comp_features), str(mp_id)
+            
+        except Exception as e:
+            print(f"Error loading composition features from CSV: {e}")
+            print("Falling back to mock data...")
+    
+    # Fallback to mock composition features
+    print(f"Mocking composition features for elements: {elements}")
+    return jnp.array(np.random.normal(0, 0.1, comp_feature_dim), dtype=jnp.float32), "mock-mp-id"
+
+
 import argparse
 parser = argparse.ArgumentParser(description='')
 
@@ -54,6 +100,8 @@ group.add_argument('--dropout_rate', type=float, default=0.1, help='The dropout 
 group.add_argument('--attn_dropout', type=float, default=0.1, help='The dropout rate for attention')
 group.add_argument('--use_comp_feature', action='store_true', help='Whether to use composition features from CSV')
 group.add_argument('--comp_feature_dim', type=int, default=256, help='Dimension of composition features')
+group.add_argument('--comp_csv_path', type=str, default='/root/autodl-tmp/CrystalFormer/data/test_comp_cleaned.csv', help='Path to CSV file containing composition features')
+group.add_argument('--comp_data_index', type=int, default=0, help='Which row to read from CSV for composition features (0-indexed)')
 
 group = parser.add_argument_group('loss parameters')
 group.add_argument("--lamb_a", type=float, default=1.0, help="weight for the a part relative to fc")
@@ -176,15 +224,33 @@ else:
     else:
         w_mask = None
 
-################### Model #############################
-params, transformer = make_transformer(key, args.Nf, args.Kx, args.Kl, args.n_max, 
-                                      args.h0_size, 
-                                      args.transformer_layers, args.num_heads, 
-                                      args.key_size, args.model_size, args.embed_size, 
-                                      args.atom_types, args.wyck_types,
-                                      args.dropout_rate, args.attn_dropout,
-                                      use_comp_feature=args.use_comp_feature,
-                                      comp_feature_dim=args.comp_feature_dim)
+    # Generate composition features if needed for inference
+    composition_features = None
+    mp_id = None
+    if args.use_comp_feature:
+        if args.elements is not None:
+            print(f"Loading composition features for elements: {args.elements}")
+            composition_features, mp_id = generate_composition_features(
+                args.elements, 
+                args.comp_feature_dim,
+                args.comp_csv_path,
+                args.comp_data_index
+            )
+            print(f"Loaded composition features shape: {composition_features.shape}")
+        else:
+            print("Warning: --use_comp_feature specified but no --elements provided")
+            composition_features = jnp.zeros(args.comp_feature_dim, dtype=jnp.float32)
+            mp_id = "no-mp-id"
+
+    ################### Model #############################
+    params, transformer = make_transformer(key, args.Nf, args.Kx, args.Kl, args.n_max, 
+                                          args.h0_size, 
+                                          args.transformer_layers, args.num_heads, 
+                                          args.key_size, args.model_size, args.embed_size, 
+                                          args.atom_types, args.wyck_types,
+                                          args.dropout_rate, args.attn_dropout,
+                                          use_comp_feature=args.use_comp_feature,
+                                          comp_feature_dim=args.comp_feature_dim)
 transformer_name = 'Nf_%d_Kx_%d_Kl_%d_h0_%d_l_%d_H_%d_k_%d_m_%d_e_%d_drop_%g_%g'%(args.Nf, args.Kx, args.Kl, args.h0_size, args.transformer_layers, args.num_heads, args.key_size, args.model_size, args.embed_size, args.dropout_rate, args.attn_dropout)
 
 print ("# of transformer params", ravel_pytree(params)[0].size) 
@@ -270,7 +336,7 @@ else:
         end_idx = min(start_idx + args.batchsize, args.num_samples)
         n_sample = end_idx - start_idx
         key, subkey = jax.random.split(key)
-        XYZ, A, W, M, L = sample_crystal(subkey, transformer, params, args.n_max, n_sample, args.atom_types, args.wyck_types, args.Kx, args.Kl, args.spacegroup, w_mask, atom_mask, args.top_p, args.temperature, T1, constraints)
+        XYZ, A, W, M, L = sample_crystal(subkey, transformer, params, args.n_max, n_sample, args.atom_types, args.wyck_types, args.Kx, args.Kl, args.spacegroup, w_mask, atom_mask, args.top_p, args.temperature, T1, constraints, composition_features)
 
         G = args.spacegroup * jnp.ones((n_sample), dtype=int)
         if args.mcmc:
@@ -300,6 +366,12 @@ else:
         data['A'] = np.array(A).tolist()
         data['W'] = np.array(W).tolist()
         data['M'] = np.array(M).tolist()
+        
+        # 添加mp-id信息到每一行
+        if mp_id is not None:
+            data['mp_id'] = [mp_id] * n_sample
+        else:
+            data['mp_id'] = ["unknown"] * n_sample
 
         num_atoms = jnp.sum(M, axis=1)
         length, angle = jnp.split(L, 2, axis=-1)
@@ -308,7 +380,15 @@ else:
         L = jnp.concatenate([length, angle], axis=-1)
 
         # G = args.spacegroup * jnp.ones((n_sample), dtype=int)
-        logp_w, logp_xyz, logp_a, logp_l = jax.jit(logp_fn, static_argnums=7)(params, key, G, L, XYZ, A, W, False)
+        if args.use_comp_feature:
+            # Extend composition features to match batch size
+            if composition_features is not None:
+                batch_comp_features = jnp.tile(composition_features[None, :], (n_sample, 1))
+            else:
+                batch_comp_features = jnp.zeros((n_sample, args.comp_feature_dim), dtype=jnp.float32)
+            logp_w, logp_xyz, logp_a, logp_l = jax.jit(logp_fn, static_argnums=7)(params, key, G, L, XYZ, A, W, False, batch_comp_features)
+        else:
+            logp_w, logp_xyz, logp_a, logp_l = jax.jit(logp_fn, static_argnums=7)(params, key, G, L, XYZ, A, W, False)
 
         data['logp_w'] = np.array(logp_w).tolist()
         data['logp_xyz'] = np.array(logp_xyz).tolist()
