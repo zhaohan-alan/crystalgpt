@@ -7,7 +7,7 @@ import multiprocessing
 import math
 import pandas as pd
 import numpy as np 
-np.set_printoptions(threshold=np.inf)
+np.set_printoptions(threshold=10000)
 
 from crystalformer.src.utils import GLXYZAW_from_file, letter_to_number
 from crystalformer.src.elements import element_dict, element_list
@@ -52,6 +52,8 @@ group.add_argument('--model_size', type=int, default=64, help='The model size')
 group.add_argument('--embed_size', type=int, default=32, help='The enbedding size')
 group.add_argument('--dropout_rate', type=float, default=0.1, help='The dropout rate for MLP')
 group.add_argument('--attn_dropout', type=float, default=0.1, help='The dropout rate for attention')
+group.add_argument('--use_comp_feature', action='store_true', help='Whether to use composition features from CSV')
+group.add_argument('--comp_feature_dim', type=int, default=256, help='Dimension of composition features')
 
 group = parser.add_argument_group('loss parameters')
 group.add_argument("--lamb_a", type=float, default=1.0, help="weight for the a part relative to fc")
@@ -95,8 +97,16 @@ if args.num_io_process > num_cpu:
 
 ################### Data #############################
 if args.optimizer != "none":
-    train_data = GLXYZAW_from_file(args.train_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
-    valid_data = GLXYZAW_from_file(args.valid_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
+    if args.use_comp_feature:
+        train_data = GLXYZAW_from_file(args.train_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process, 
+                                     use_comp_feature=True, comp_feature_dim=args.comp_feature_dim)
+        valid_data = GLXYZAW_from_file(args.valid_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process,
+                                     use_comp_feature=True, comp_feature_dim=args.comp_feature_dim)
+
+    else:
+        train_data = GLXYZAW_from_file(args.train_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
+        valid_data = GLXYZAW_from_file(args.valid_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
+
 else:
     assert (args.spacegroup is not None) # for inference we need to specify space group
     # test_data = GLXYZAW_from_file(args.test_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
@@ -172,14 +182,16 @@ params, transformer = make_transformer(key, args.Nf, args.Kx, args.Kl, args.n_ma
                                       args.transformer_layers, args.num_heads, 
                                       args.key_size, args.model_size, args.embed_size, 
                                       args.atom_types, args.wyck_types,
-                                      args.dropout_rate, args.attn_dropout)
+                                      args.dropout_rate, args.attn_dropout,
+                                      use_comp_feature=args.use_comp_feature,
+                                      comp_feature_dim=args.comp_feature_dim)
 transformer_name = 'Nf_%d_Kx_%d_Kl_%d_h0_%d_l_%d_H_%d_k_%d_m_%d_e_%d_drop_%g_%g'%(args.Nf, args.Kx, args.Kl, args.h0_size, args.transformer_layers, args.num_heads, args.key_size, args.model_size, args.embed_size, args.dropout_rate, args.attn_dropout)
 
 print ("# of transformer params", ravel_pytree(params)[0].size) 
 
 ################### Train #############################
 
-loss_fn, logp_fn = make_loss_fn(args.n_max, args.atom_types, args.wyck_types, args.Kx, args.Kl, transformer, args.lamb_a, args.lamb_w, args.lamb_l)
+loss_fn, logp_fn = make_loss_fn(args.n_max, args.atom_types, args.wyck_types, args.Kx, args.Kl, transformer, args.lamb_a, args.lamb_w, args.lamb_l, args.use_comp_feature)
 
 print("\n========== Prepare logs ==========")
 if args.optimizer != "none" or args.restore_path is None:

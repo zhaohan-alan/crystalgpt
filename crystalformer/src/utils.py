@@ -41,9 +41,14 @@ def shuffle(key, data):
     """
     shuffle data along batch dimension
     """
-    G, L, XYZ, A, W = data
-    idx = jax.random.permutation(key, jnp.arange(len(L)))
-    return G[idx], L[idx], XYZ[idx], A[idx], W[idx]
+    if len(data) == 6:  # composition features included
+        G, L, XYZ, A, W, C = data
+        idx = jax.random.permutation(key, jnp.arange(len(L)))
+        return G[idx], L[idx], XYZ[idx], A[idx], W[idx], C[idx]
+    else:  # no composition features
+        G, L, XYZ, A, W = data
+        idx = jax.random.permutation(key, jnp.arange(len(L)))
+        return G[idx], L[idx], XYZ[idx], A[idx], W[idx]
     
 def process_one(cif, atom_types, wyck_types, n_max, tol=0.01):
     """
@@ -125,9 +130,9 @@ def process_one(cif, atom_types, wyck_types, n_max, tol=0.01):
 
     return g, l, fc, aa, ww 
 
-def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1):
+def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1, use_comp_feature=False, comp_feature_dim=256):
     """
-    Read cif strings from csv file and convert them to G, L, XYZ, A, W
+    Read cif strings from csv file and convert them to G, L, XYZ, A, W, and optionally composition features
     Note that cif strings must be in the column 'cif'
 
     Args:
@@ -136,6 +141,8 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1):
       wyck_types: number of wyckoff types
       n_max: maximum number of atoms in the unit cell
       num_workers: number of workers for multiprocessing
+      use_comp_feature: whether to load composition features from CSV
+      comp_feature_dim: dimension of composition features (default 256)
 
     Returns:
       G: space group number
@@ -143,6 +150,7 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1):
       XYZ: fractional coordinates
       A: atom types
       W: wyckoff letters
+      C: composition features (if use_comp_feature=True)
     """
     if csv_file.endswith('.lmdb'):
         import lmdb
@@ -168,8 +176,19 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1):
         return G, L, XYZ, A, W
 
     data = pd.read_csv(csv_file)
+    #只取前100行
+    # data = data.head(100)
     try: cif_strings = data['cif']
     except: cif_strings = data['structure']
+
+    # Load composition features if requested
+    comp_features = None
+    if use_comp_feature:
+        # Composition features start from column 10 (0-indexed column 9)
+        comp_columns = data.columns[9:9+comp_feature_dim]
+        comp_features = data[comp_columns].values
+        comp_features = jnp.array(comp_features, dtype=jnp.float32)
+        print(f'Loaded composition features with shape: {comp_features.shape}')
 
     p = multiprocessing.Pool(num_workers)
     partial_process_one = partial(process_one, atom_types=atom_types, wyck_types=wyck_types, n_max=n_max)
@@ -187,7 +206,10 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1):
 
     A, XYZ = sort_atoms(W, A, XYZ)
     
-    return G, L, XYZ, A, W
+    if use_comp_feature:
+        return G, L, XYZ, A, W, comp_features
+    else:
+        return G, L, XYZ, A, W
 
 def GLXA_to_structure_single(G, L, X, A):
     """

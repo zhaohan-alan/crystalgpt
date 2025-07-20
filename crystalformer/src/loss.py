@@ -8,7 +8,7 @@ from crystalformer.src.lattice import make_lattice_mask
 from crystalformer.src.wyckoff import mult_table, fc_mask_table
 
 
-def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0, lamb_w=1.0, lamb_l=1.0):
+def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0, lamb_w=1.0, lamb_l=1.0, use_comp_feature=False):
     """
     Args:
       n_max: maximum number of atoms in the unit cell
@@ -39,62 +39,121 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
 
         return logp_x
 
-    @partial(jax.vmap, in_axes=(None, None, 0, 0, 0, 0, 0, None), out_axes=0) # batch 
-    def logp_fn(params, key, G, L, XYZ, A, W, is_train):
-        '''
-        G: scalar 
-        L: (6,) [a, b, c, alpha, beta, gamma] 
-        XYZ: (n_max, 3)
-        A: (n_max,)
-        W: (n_max,)
-        '''
+    if use_comp_feature:
+        @partial(jax.vmap, in_axes=(None, None, 0, 0, 0, 0, 0, None, 0), out_axes=0) # batch 
+        def logp_fn(params, key, G, L, XYZ, A, W, is_train, C):
+            '''
+            G: scalar 
+            L: (6,) [a, b, c, alpha, beta, gamma] 
+            XYZ: (n_max, 3)
+            A: (n_max,)
+            W: (n_max,)
+            C: (comp_feature_dim,) composition features
+            '''
 
-        num_sites = jnp.sum(A!=0)
-        M = mult_table[G-1, W]  # (n_max,) multplicities
-        #num_atoms = jnp.sum(M)
+            num_sites = jnp.sum(A!=0)
+            M = mult_table[G-1, W]  # (n_max,) multplicities
+            #num_atoms = jnp.sum(M)
 
-        h = transformer(params, key, G, XYZ, A, W, M, is_train) # (5*n_max+1, ...)
-        w_logit = h[0::5, :wyck_types] # (n_max+1, wyck_types) 
-        w_logit = w_logit[:-1] # (n_max, wyck_types)
-        a_logit = h[1::5, :atom_types] 
-        h_x = h[2::5, :coord_types]
-        h_y = h[3::5, :coord_types]
-        h_z = h[4::5, :coord_types]
+            h = transformer(params, key, G, XYZ, A, W, M, is_train, C) # (5*n_max+1, ...)
+            
+            w_logit = h[0::5, :wyck_types] # (n_max+1, wyck_types) 
+            w_logit = w_logit[:-1] # (n_max, wyck_types)
+            a_logit = h[1::5, :atom_types] 
+            h_x = h[2::5, :coord_types]
+            h_y = h[3::5, :coord_types]
+            h_z = h[4::5, :coord_types]
 
-        logp_w = jnp.sum(w_logit[jnp.arange(n_max), W.astype(int)])
-        logp_a = jnp.sum(a_logit[jnp.arange(n_max), A.astype(int)])
+            logp_w = jnp.sum(w_logit[jnp.arange(n_max), W.astype(int)])
+            logp_a = jnp.sum(a_logit[jnp.arange(n_max), A.astype(int)])
 
-        X, Y, Z = XYZ[:, 0], XYZ[:, 1], XYZ[:,2]
+            X, Y, Z = XYZ[:, 0], XYZ[:, 1], XYZ[:,2]
 
-        fc_mask = jnp.logical_and((W>0)[:, None], fc_mask_table[G-1, W]) # (n_max, 3)
-        logp_x = compute_logp_x(h_x, X, fc_mask[:, 0])
-        logp_y = compute_logp_x(h_y, Y, fc_mask[:, 1])
-        logp_z = compute_logp_x(h_z, Z, fc_mask[:, 2])
+            fc_mask = jnp.logical_and((W>0)[:, None], fc_mask_table[G-1, W]) # (n_max, 3)
+            logp_x = compute_logp_x(h_x, X, fc_mask[:, 0])
+            logp_y = compute_logp_x(h_y, Y, fc_mask[:, 1])
+            logp_z = compute_logp_x(h_z, Z, fc_mask[:, 2])
 
-        logp_xyz = logp_x + logp_y + logp_z
+            logp_xyz = logp_x + logp_y + logp_z
 
-        l_logit, mu, sigma = jnp.split(h[1::5][num_sites, 
-                                               atom_types:atom_types+Kl+2*6*Kl], [Kl, Kl+Kl*6], axis=-1)
-        mu = mu.reshape(Kl, 6)
-        sigma = sigma.reshape(Kl, 6)
-        logp_l = jax.vmap(jax.scipy.stats.norm.logpdf, (None, 0, 0))(L,mu,sigma) #(Kl, 6)
-        logp_l = jax.scipy.special.logsumexp(l_logit[:, None] + logp_l, axis=0) # (6,)
-        logp_l = jnp.sum(jnp.where((lattice_mask[G-1]>0), logp_l, jnp.zeros_like(logp_l)))
-        
-        return logp_w, logp_xyz, logp_a, logp_l
+            l_logit, mu, sigma = jnp.split(h[1::5][num_sites, 
+                                                   atom_types:atom_types+Kl+2*6*Kl], [Kl, Kl+Kl*6], axis=-1)
+            mu = mu.reshape(Kl, 6)
+            sigma = sigma.reshape(Kl, 6)
+            logp_l = jax.vmap(jax.scipy.stats.norm.logpdf, (None, 0, 0))(L,mu,sigma) #(Kl, 6)
+            logp_l = jax.scipy.special.logsumexp(l_logit[:, None] + logp_l, axis=0) # (6,)
+            logp_l = jnp.sum(jnp.where((lattice_mask[G-1]>0), logp_l, jnp.zeros_like(logp_l)))
+            
+            return logp_w, logp_xyz, logp_a, logp_l
+    else:
+        @partial(jax.vmap, in_axes=(None, None, 0, 0, 0, 0, 0, None), out_axes=0) # batch 
+        def logp_fn(params, key, G, L, XYZ, A, W, is_train):
+            '''
+            G: scalar 
+            L: (6,) [a, b, c, alpha, beta, gamma] 
+            XYZ: (n_max, 3)
+            A: (n_max,)
+            W: (n_max,)
+            '''
+
+            num_sites = jnp.sum(A!=0)
+            M = mult_table[G-1, W]  # (n_max,) multplicities
+            #num_atoms = jnp.sum(M)
+
+            h = transformer(params, key, G, XYZ, A, W, M, is_train) # (5*n_max+1, ...)
+            
+            w_logit = h[0::5, :wyck_types] # (n_max+1, wyck_types) 
+            w_logit = w_logit[:-1] # (n_max, wyck_types)
+            a_logit = h[1::5, :atom_types] 
+            h_x = h[2::5, :coord_types]
+            h_y = h[3::5, :coord_types]
+            h_z = h[4::5, :coord_types]
+
+            logp_w = jnp.sum(w_logit[jnp.arange(n_max), W.astype(int)])
+            logp_a = jnp.sum(a_logit[jnp.arange(n_max), A.astype(int)])
+
+            X, Y, Z = XYZ[:, 0], XYZ[:, 1], XYZ[:,2]
+
+            fc_mask = jnp.logical_and((W>0)[:, None], fc_mask_table[G-1, W]) # (n_max, 3)
+            logp_x = compute_logp_x(h_x, X, fc_mask[:, 0])
+            logp_y = compute_logp_x(h_y, Y, fc_mask[:, 1])
+            logp_z = compute_logp_x(h_z, Z, fc_mask[:, 2])
+
+            logp_xyz = logp_x + logp_y + logp_z
+
+            l_logit, mu, sigma = jnp.split(h[1::5][num_sites, 
+                                                   atom_types:atom_types+Kl+2*6*Kl], [Kl, Kl+Kl*6], axis=-1)
+            mu = mu.reshape(Kl, 6)
+            sigma = sigma.reshape(Kl, 6)
+            logp_l = jax.vmap(jax.scipy.stats.norm.logpdf, (None, 0, 0))(L,mu,sigma) #(Kl, 6)
+            logp_l = jax.scipy.special.logsumexp(l_logit[:, None] + logp_l, axis=0) # (6,)
+            logp_l = jnp.sum(jnp.where((lattice_mask[G-1]>0), logp_l, jnp.zeros_like(logp_l)))
+            
+            return logp_w, logp_xyz, logp_a, logp_l
+
 
     # https://github.com/google/jax/blob/cd6eeea9e3e8652e17fdbb1575c9a63fcd558d6b/jax/_src/ad_checkpoint.py#L73
     # This is a useful heuristic for transformers.
     # @partial(jax.checkpoint, policy=jax.checkpoint_policies.offload_dot_with_no_batch_dims, static_argnums=(7,))
     # @partial(jax.checkpoint, policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable, static_argnums=(7,))
-    def loss_fn(params, key, G, L, XYZ, A, W, is_train):
-        logp_w, logp_xyz, logp_a, logp_l = logp_fn(params, key, G, L, XYZ, A, W, is_train)
-        loss_w = -jnp.mean(logp_w)
-        loss_xyz = -jnp.mean(logp_xyz)
-        loss_a = -jnp.mean(logp_a)
-        loss_l = -jnp.mean(logp_l)
+    if use_comp_feature:
+        def loss_fn(params, key, G, L, XYZ, A, W, is_train, C):
+            logp_w, logp_xyz, logp_a, logp_l = logp_fn(params, key, G, L, XYZ, A, W, is_train, C)
+            loss_w = -jnp.mean(logp_w)
+            loss_xyz = -jnp.mean(logp_xyz)
+            loss_a = -jnp.mean(logp_a)
+            loss_l = -jnp.mean(logp_l)
 
-        return loss_xyz + lamb_a* loss_a + lamb_w*loss_w + lamb_l*loss_l, (loss_w, loss_a, loss_xyz, loss_l)
+            return loss_xyz + lamb_a* loss_a + lamb_w*loss_w + lamb_l*loss_l, (loss_w, loss_a, loss_xyz, loss_l)
+    else:
+        def loss_fn(params, key, G, L, XYZ, A, W, is_train):
+            logp_w, logp_xyz, logp_a, logp_l = logp_fn(params, key, G, L, XYZ, A, W, is_train)
+            loss_w = -jnp.mean(logp_w)
+            loss_xyz = -jnp.mean(logp_xyz)
+            loss_a = -jnp.mean(logp_a)
+            loss_l = -jnp.mean(logp_l)
+
+            return loss_xyz + lamb_a* loss_a + lamb_w*loss_w + lamb_l*loss_l, (loss_w, loss_a, loss_xyz, loss_l)
         
     return loss_fn, logp_fn
 

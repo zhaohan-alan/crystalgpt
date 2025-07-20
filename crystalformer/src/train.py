@@ -42,8 +42,12 @@ def train(key, optimizer, opt_state, loss_fn, params, epoch_finished, epochs, ba
 
     @partial(jax.pmap, axis_name="p", in_axes=(None, 0, None, 0), out_axes=(None, None, 0),)
     def update(params, key, opt_state, data):
-        G, L, X, A, W = data
-        value, grad = jax.value_and_grad(loss_fn, has_aux=True)(params, key, G, L, X, A, W, True)
+        if len(data) == 6:  # composition features included
+            G, L, X, A, W, C = data
+            value, grad = jax.value_and_grad(loss_fn, has_aux=True)(params, key, G, L, X, A, W, True, C)
+        else:  # no composition features
+            G, L, X, A, W = data
+            value, grad = jax.value_and_grad(loss_fn, has_aux=True)(params, key, G, L, X, A, W, True)
         grad = jax.lax.pmean(grad, axis_name="p")
         value = jax.lax.pmean(value, axis_name="p")
         updates, opt_state = optimizer.update(grad, opt_state, params)
@@ -59,7 +63,10 @@ def train(key, optimizer, opt_state, loss_fn, params, epoch_finished, epochs, ba
         key, subkey = jax.random.split(key)
         train_data = shuffle(subkey, train_data)
 
-        _, train_L, _, _, _ = train_data
+        if len(train_data) == 6:  # composition features included
+            _, train_L, _, _, _, _ = train_data
+        else:  # no composition features
+            _, train_L, _, _, _ = train_data
 
         train_loss = 0.0 
         train_aux = 0.0, 0.0, 0.0, 0.0
@@ -88,7 +95,10 @@ def train(key, optimizer, opt_state, loss_fn, params, epoch_finished, epochs, ba
                         ) 
 
         if epoch % val_interval == 0:
-            _, valid_L, _, _, _ = valid_data 
+            if len(valid_data) == 6:  # composition features included
+                _, valid_L, _, _, _, _ = valid_data
+            else:  # no composition features
+                _, valid_L, _, _, _ = valid_data 
             valid_loss = 0.0 
             valid_aux = 0.0, 0.0, 0.0, 0.0
             num_samples = valid_L.shape[0]
@@ -103,8 +113,17 @@ def train(key, optimizer, opt_state, loss_fn, params, epoch_finished, epochs, ba
                 data = jax.tree_util.tree_map(lambda x: x.reshape(shape_prefix + x.shape[1:]), data)
 
                 keys, subkeys = p_split(keys)
-                loss, aux = jax.pmap(loss_fn, in_axes=(None, 0, 0, 0, 0, 0, 0),
-                                     static_broadcasted_argnums=7)(params, subkeys, *data, False)
+                if len(data) == 6:  # composition features included
+                    G, L, XYZ, A, W, C = data
+                    # params, subkeys, G, L, XYZ, A, W, is_train (False), C
+                    #   0       1     2  3   4   5  6      7         8
+                    loss, aux = jax.pmap(loss_fn, in_axes=(None, 0, 0, 0, 0, 0, 0, None, 0),
+                                         static_broadcasted_argnums=7)(params, subkeys, G, L, XYZ, A, W, False, C)
+                else:  # no composition features  
+                    # params, subkeys, G, L, XYZ, A, W, is_train (False)
+                    #   0       1     2  3   4   5  6      7
+                    loss, aux = jax.pmap(loss_fn, in_axes=(None, 0, 0, 0, 0, 0, 0, None),
+                                         static_broadcasted_argnums=7)(params, subkeys, *data, False)
                 valid_loss, valid_aux = jax.tree_util.tree_map(
                         lambda acc, i: acc + jnp.mean(i),
                         (valid_loss, valid_aux), 
