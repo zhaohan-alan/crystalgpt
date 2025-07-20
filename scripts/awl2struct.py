@@ -7,6 +7,8 @@ from ast import literal_eval
 import multiprocessing
 import itertools
 import argparse
+import os
+import glob
 
 from pymatgen.core import Structure, Lattice
 from wyckoff import wmax_table, mult_table, symops
@@ -82,51 +84,121 @@ def get_struct_from_lawx(G, L, A, W, X):
     return struct.as_dict()
 
 
+def find_batch_samples_file(output_path):
+    """
+    查找batch_samples开头的CSV文件
+    
+    Args:
+        output_path: 搜索目录
+    
+    Returns:
+        找到的文件路径，如果没找到返回None
+    """
+    pattern = os.path.join(output_path, "batch_samples*.csv")
+    files = glob.glob(pattern)
+    
+    if not files:
+        return None
+    
+    # 如果有多个文件，选择最新的
+    files.sort(key=os.path.getmtime, reverse=True)
+    return files[0]
+
+
 def main(args):
-    if args.label is not None:
-        input_path = args.output_path + f'output_{args.label}.csv'
-        output_path = args.output_path + f'output_{args.label}_struct.csv'
+    # 查找batch_samples开头的CSV文件
+    input_path = find_batch_samples_file(args.output_path)
+    
+    if input_path is None:
+        print(f"❌ 错误: 在 {args.output_path} 中找不到 batch_samples*.csv 文件")
+        print("请先运行批量采样脚本生成样本数据")
+        return
+    
+    # 输出文件名
+    output_path = os.path.join(args.output_path, "batch_structures.csv")
+    
+    print(f"🔍 找到输入文件: {input_path}")
+    print(f"📝 输出文件: {output_path}")
+    print("=" * 60)
+    
+    # 读取CSV文件
+    try:
+        origin_data = pd.read_csv(input_path)
+        print(f"✅ 成功读取 {len(origin_data)} 行数据")
+    except Exception as e:
+        print(f"❌ 读取文件失败: {e}")
+        return
+    
+    # 检查必要的列
+    required_columns = ['L', 'X', 'A', 'W', 'spacegroup']
+    missing_columns = [col for col in required_columns if col not in origin_data.columns]
+    if missing_columns:
+        print(f"❌ 错误: 缺少必要的列: {missing_columns}")
+        return
+    
+    # 获取数据列
+    L = origin_data['L'].apply(lambda x: literal_eval(x))
+    X = origin_data['X'].apply(lambda x: literal_eval(x))
+    A = origin_data['A'].apply(lambda x: literal_eval(x))
+    W = origin_data['W'].apply(lambda x: literal_eval(x))
+    
+    # 从spacegroup列读取每行的spacegroup值
+    G = origin_data['spacegroup'].values
+    
+    # 读取mp_id列（如果存在）
+    mp_id_column = None
+    if 'mp_id' in origin_data.columns:
+        mp_id_column = origin_data['mp_id'].values
+        print("✅ 找到 mp_id 列")
     else:
-        input_path = args.output_path + f'output.csv'
-        output_path = args.output_path + f'output_struct.csv'
+        print("⚠️  未找到 mp_id 列，将使用默认值")
+        mp_id_column = [f"sample_{i}" for i in range(len(origin_data))]
 
-    origin_data = pd.read_csv(input_path)
-
-    L,X,A,W = origin_data['L'],origin_data['X'],origin_data['A'],origin_data['W']
-    L = L.apply(lambda x: literal_eval(x))
-    X = X.apply(lambda x: literal_eval(x))
-    A = A.apply(lambda x: literal_eval(x))
-    W = W.apply(lambda x: literal_eval(x))
-    # M = M.apply(lambda x: literal_eval(x))
-
-    # convert array of list to numpy ndarray
+    # 转换为numpy数组
     L = np.array(L.tolist())
     X = np.array(X.tolist())
     A = np.array(A.tolist())
     W = np.array(W.tolist())
-    print(L.shape,X.shape,A.shape,W.shape)
+    
+    print(f"📊 数据形状: L{L.shape}, X{X.shape}, A{A.shape}, W{W.shape}")
+    print(f"🔢 Spacegroup 范围: {G.min()} - {G.max()}")
+    print(f"🔢 唯一的 Spacegroup: {sorted(set(G))}")
+    
+    print("\n🚀 开始生成结构...")
+    
+    # 使用多进程生成结构
+    try:
+        p = multiprocessing.Pool(args.num_io_process)
+        structures = p.starmap_async(get_struct_from_lawx, zip(G, L, A, W, X)).get()
+        p.close()
+        p.join()
+        print(f"✅ 成功生成 {len(structures)} 个结构")
+    except Exception as e:
+        print(f"❌ 生成结构时出错: {e}")
+        return
 
-    if args.label is None:
-        G = origin_data['G']
-        G = np.array(G.tolist())
-    else:
-        G = np.array([int(args.label) for _ in range(len(L))])
-
-    ### Multiprocessing. Use it if only run on CPU
-    p = multiprocessing.Pool(args.num_io_process)
-    structures = p.starmap_async(get_struct_from_lawx, zip(G, L, A, W, X)).get()
-    p.close()
-    p.join()
-
-    data = pd.DataFrame()
-    data['cif'] = structures
-    data.to_csv(output_path, mode='a', index=False, header=True)
+    # 创建输出数据框
+    output_data = pd.DataFrame()
+    output_data['cif'] = structures
+    output_data['mp_id'] = mp_id_column
+    
+    # 保存结果
+    try:
+        output_data.to_csv(output_path, index=False)
+        print(f"🎉 成功保存结果到: {output_path}")
+        print(f"📈 输出统计:")
+        print(f"   - 总样本数: {len(output_data)}")
+        print(f"   - 包含列: {list(output_data.columns)}")
+    except Exception as e:
+        print(f"❌ 保存文件时出错: {e}")
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='')
-    parser.add_argument('--output_path', default='./', help='filepath of the output and input file')
-    parser.add_argument('--label', default=None, help='output file label')
-    parser.add_argument('--num_io_process', type=int, default=40, help='number of process used in multiprocessing io')
+    parser = argparse.ArgumentParser(description='将批量采样结果转换为晶体结构')
+    parser.add_argument('--output_path', default='test_output/', 
+                        help='搜索batch_samples*.csv文件的目录路径')
+    parser.add_argument('--num_io_process', type=int, default=40, 
+                        help='多进程处理的进程数')
+    
     args = parser.parse_args()
     main(args)

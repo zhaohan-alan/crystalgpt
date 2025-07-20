@@ -328,9 +328,14 @@ else:
         update_lattice = make_update_lattice(transformer, params, args.atom_types, args.Kl, args.top_p, args.temperature)
 
     num_batches = math.ceil(args.num_samples / args.batchsize)
-    name, extension = args.output_filename.rsplit('.', 1)
-    filename = os.path.join(output_path, 
-                            f"{name}_{args.spacegroup}.{extension}")
+    
+    # 如果指定了自定义文件名（不是默认的output.csv），则直接使用，否则添加spacegroup后缀
+    if args.output_filename != 'output.csv':
+        filename = os.path.join(output_path, args.output_filename)
+    else:
+        name, extension = args.output_filename.rsplit('.', 1)
+        filename = os.path.join(output_path, 
+                                f"{name}_{args.spacegroup}.{extension}")
     for batch_idx in range(num_batches):
         start_idx = batch_idx * args.batchsize
         end_idx = min(start_idx + args.batchsize, args.num_samples)

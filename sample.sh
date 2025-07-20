@@ -1,1 +1,7 @@
-python ./main.py --optimizer none --restore_path test_output/adam_bs_90_lr_0.0005_decay_0_clip_1_A_119_W_28_N_21_a_1_w_1_l_1_Nf_5_Kx_16_Kl_16_h0_256_l_16_H_8_k_64_m_32_e_32_drop_0.4_0.4 --spacegroup 194 --num_samples 30 --batchsize 10 --temperature 1.0 --model_size 32 --num_heads 8 --Kl 16 --elements Ga Te --use_comp_feature --comp_csv_path /root/autodl-tmp/CrystalFormer/data/test_comp_cleaned.csv --comp_data_index 0
+#!/bin/bash
+
+echo "开始高效批量采样 - 读取CSV前10行，每行生成30个样本"
+echo "使用优化版本：只初始化一次模型，内存中循环处理"
+echo "================================================"
+
+python batch_sample_fast.py
