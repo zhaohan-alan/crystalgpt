@@ -8,7 +8,7 @@ from crystalformer.src.lattice import make_lattice_mask
 from crystalformer.src.wyckoff import mult_table, fc_mask_table
 
 
-def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0, lamb_w=1.0, lamb_l=1.0, use_comp_feature=False):
+def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0, lamb_w=1.0, lamb_l=1.0, use_comp_feature=False, use_xrd_feature=False):
     """
     Args:
       n_max: maximum number of atoms in the unit cell
@@ -20,6 +20,8 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
       lamb_a: weight for atom type loss
       lamb_w: weight for wyckoff position loss
       lamb_l: weight for lattice parameter loss
+      use_comp_feature: whether to use composition features
+      use_xrd_feature: whether to use XRD features
 
     Returns:
       loss_fn: loss function
@@ -39,23 +41,34 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
 
         return logp_x
 
-    if use_comp_feature:
-        @partial(jax.vmap, in_axes=(None, None, 0, 0, 0, 0, 0, None, 0), out_axes=0) # batch 
-        def logp_fn(params, key, G, L, XYZ, A, W, is_train, C):
+    # Create unified logp_fn based on feature usage
+    if use_comp_feature or use_xrd_feature:
+        # Build vmap in_axes dynamically based on feature usage
+        base_in_axes = (None, None, 0, 0, 0, 0, 0, None)  # (params, key, G, L, XYZ, A, W, is_train)
+        if use_comp_feature:
+            base_in_axes = base_in_axes + (0,)  # add C axis
+        if use_xrd_feature:
+            base_in_axes = base_in_axes + (0,)  # add X_xrd axis
+        
+        @partial(jax.vmap, in_axes=base_in_axes, out_axes=0) # batch
+        def logp_fn(params, key, G, L, XYZ, A, W, is_train, *features):
             '''
             G: scalar 
             L: (6,) [a, b, c, alpha, beta, gamma] 
             XYZ: (n_max, 3)
             A: (n_max,)
             W: (n_max,)
-            C: (comp_feature_dim,) composition features
+            *features: optional C (composition) and X_xrd features
             '''
+            # Unpack features
+            C = features[0] if use_comp_feature else None
+            X_xrd = features[1] if use_xrd_feature and len(features) > 1 else \
+                   (features[0] if use_xrd_feature and not use_comp_feature else None)
 
             num_sites = jnp.sum(A!=0)
             M = mult_table[G-1, W]  # (n_max,) multplicities
-            #num_atoms = jnp.sum(M)
 
-            h = transformer(params, key, G, XYZ, A, W, M, is_train, C) # (5*n_max+1, ...)
+            h = transformer(params, key, G, XYZ, A, W, M, is_train, C, X_xrd) # (5*n_max+1, ...)
             
             w_logit = h[0::5, :wyck_types] # (n_max+1, wyck_types) 
             w_logit = w_logit[:-1] # (n_max, wyck_types)
@@ -98,7 +111,6 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
 
             num_sites = jnp.sum(A!=0)
             M = mult_table[G-1, W]  # (n_max,) multplicities
-            #num_atoms = jnp.sum(M)
 
             h = transformer(params, key, G, XYZ, A, W, M, is_train) # (5*n_max+1, ...)
             
@@ -136,9 +148,11 @@ def make_loss_fn(n_max, atom_types, wyck_types, Kx, Kl, transformer, lamb_a=1.0,
     # This is a useful heuristic for transformers.
     # @partial(jax.checkpoint, policy=jax.checkpoint_policies.offload_dot_with_no_batch_dims, static_argnums=(7,))
     # @partial(jax.checkpoint, policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable, static_argnums=(7,))
-    if use_comp_feature:
-        def loss_fn(params, key, G, L, XYZ, A, W, is_train, C):
-            logp_w, logp_xyz, logp_a, logp_l = logp_fn(params, key, G, L, XYZ, A, W, is_train, C)
+    
+    # Create unified loss_fn based on feature usage
+    if use_comp_feature or use_xrd_feature:
+        def loss_fn(params, key, G, L, XYZ, A, W, is_train, *features):
+            logp_w, logp_xyz, logp_a, logp_l = logp_fn(params, key, G, L, XYZ, A, W, is_train, *features)
             loss_w = -jnp.mean(logp_w)
             loss_xyz = -jnp.mean(logp_xyz)
             loss_a = -jnp.mean(logp_a)

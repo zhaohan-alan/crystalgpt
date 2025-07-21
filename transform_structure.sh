@@ -4,7 +4,7 @@ echo "开始批量结构转换 - 统一处理所有spacegroup"
 echo "================================================"
 
 # 配置参数
-OUTPUT_PATH="test_output/"
+OUTPUT_PATH="xrd_test_output/"
 NUM_IO_PROCESS=40
 
 echo "输出路径: $OUTPUT_PATH"

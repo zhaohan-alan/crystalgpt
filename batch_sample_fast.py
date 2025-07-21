@@ -45,7 +45,9 @@ class BatchSampler:
             self.args.atom_types, self.args.wyck_types,
             self.args.dropout_rate, self.args.attn_dropout,
             use_comp_feature=self.args.use_comp_feature,
-            comp_feature_dim=self.args.comp_feature_dim
+            comp_feature_dim=self.args.comp_feature_dim,
+            use_xrd_feature=self.args.use_xrd_feature,
+            xrd_feature_dim=self.args.xrd_feature_dim
         )
         
         print("正在加载checkpoint...")
@@ -57,7 +59,8 @@ class BatchSampler:
         # 创建损失函数 (注意正确的参数顺序)
         self.loss_fn, self.logp_fn = make_loss_fn(
             self.args.n_max, self.args.atom_types, self.args.wyck_types, self.args.Kx, self.args.Kl, 
-            self.transformer, self.args.lamb_a, self.args.lamb_w, self.args.lamb_l, self.args.use_comp_feature
+            self.transformer, self.args.lamb_a, self.args.lamb_w, self.args.lamb_l, 
+            self.args.use_comp_feature, self.args.use_xrd_feature
         )
         
         # 预计算一些mask (按照main.py的方式)
@@ -115,6 +118,10 @@ class BatchSampler:
                 # 组成特征参数
                 self.use_comp_feature = True
                 self.comp_feature_dim = 256
+                
+                # XRD特征参数
+                self.use_xrd_feature = True
+                self.xrd_feature_dim = 1080
         
         return Args()
     
@@ -143,6 +150,33 @@ class BatchSampler:
         # 回退到模拟数据
         return jnp.array(np.random.normal(0, 0.1, self.args.comp_feature_dim), dtype=jnp.float32), "mock-mp-id"
     
+    def generate_xrd_features(self, csv_path: str, data_index: int):
+        """生成XRD特征"""
+        if csv_path is not None and os.path.exists(csv_path) and 'xrd' in csv_path:
+            try:
+                df = pd.read_csv(csv_path)
+                
+                if data_index >= len(df):
+                    print(f"警告: data_index {data_index} >= 数据集大小 {len(df)}, 使用最后一行")
+                    data_index = len(df) - 1
+                
+                if 'xrd_data' in df.columns:
+                    # 读取XRD数据（逗号分隔的字符串）
+                    xrd_str = df.iloc[data_index]['xrd_data']
+                    xrd_values = [float(x) for x in xrd_str.split(',')]
+                    xrd_features = np.array(xrd_values, dtype=np.float32)
+                    
+                    if len(xrd_features) == self.args.xrd_feature_dim:
+                        return jnp.array(xrd_features)
+                    else:
+                        print(f"警告: XRD特征维度不匹配 ({len(xrd_features)} vs {self.args.xrd_feature_dim})")
+                        
+            except Exception as e:
+                print(f"加载XRD特征时出错: {e}")
+        
+        # 回退到零向量（在生成新结构时，通常没有目标XRD）
+        return jnp.zeros(self.args.xrd_feature_dim, dtype=jnp.float32)
+    
     def sample_single_row(self, row_index: int, mp_id: str, elements: List[str], 
                          spacegroup: int, num_samples: int, csv_path: str):
         """为单行数据生成样本"""
@@ -154,6 +188,9 @@ class BatchSampler:
         
         # 生成组成特征
         composition_features, loaded_mp_id = self.generate_composition_features(csv_path, row_index)
+        
+        # 生成XRD特征
+        xrd_features = self.generate_xrd_features(csv_path, row_index) if self.args.use_xrd_feature else None
         
         # 位置约束 (按照main.py的方式) - 这不是元素约束！
         constraints = jnp.arange(0, self.args.n_max, 1)
@@ -187,7 +224,7 @@ class BatchSampler:
                 subkey, self.transformer, self.params, self.args.n_max, n_sample, 
                 self.args.atom_types, self.args.wyck_types, self.args.Kx, self.args.Kl, 
                 spacegroup, self.w_mask, atom_mask, self.args.top_p, self.args.temperature, 
-                self.args.temperature, constraints, composition_features
+                self.args.temperature, constraints, composition_features, xrd_features
             )
             
             # 准备数据
@@ -211,12 +248,22 @@ class BatchSampler:
             
             G = spacegroup * jnp.ones((n_sample), dtype=int)
             
-            if composition_features is not None:
+            # 根据特征配置调用不同的logp_fn
+            if self.args.use_comp_feature and self.args.use_xrd_feature:
+                # 两种特征都使用
+                batch_comp_features = jnp.tile(composition_features[None, :], (n_sample, 1))
+                batch_xrd_features = jnp.tile(xrd_features[None, :], (n_sample, 1))
+                logp_w, logp_xyz, logp_a, logp_l = jax.jit(self.logp_fn, static_argnums=7)(
+                    self.params, subkey, G, L_normalized, XYZ, A, W, False, batch_comp_features, batch_xrd_features
+                )
+            elif self.args.use_comp_feature:
+                # 只使用composition特征
                 batch_comp_features = jnp.tile(composition_features[None, :], (n_sample, 1))
                 logp_w, logp_xyz, logp_a, logp_l = jax.jit(self.logp_fn, static_argnums=7)(
                     self.params, subkey, G, L_normalized, XYZ, A, W, False, batch_comp_features
                 )
             else:
+                # 不使用额外特征
                 logp_w, logp_xyz, logp_a, logp_l = jax.jit(self.logp_fn, static_argnums=7)(
                     self.params, subkey, G, L_normalized, XYZ, A, W, False
                 )
@@ -270,11 +317,11 @@ def extract_csv_data(csv_path: str, num_rows: int = 10) -> List[Tuple[int, str, 
 
 def main():
     # 配置参数
-    CSV_PATH = "data/test_comp_cleaned.csv"
-    NUM_ROWS = 10
+    CSV_PATH = "data/test_comp_cleaned_xrd.csv"  # 使用包含XRD数据的文件
+    NUM_ROWS = 5
     SAMPLES_PER_ROW = 30
-    RESTORE_PATH = "test_output/adam_bs_90_lr_0.0005_decay_0_clip_1_A_119_W_28_N_21_a_1_w_1_l_1_Nf_5_Kx_16_Kl_16_h0_256_l_16_H_8_k_64_m_32_e_32_drop_0.4_0.4"
-    OUTPUT_FILE = "batch_samples_10rows_fast.csv"
+    RESTORE_PATH = "xrd_test_output/adam_bs_90_lr_0.0005_decay_0_clip_1_A_119_W_28_N_21_a_1_w_1_l_1_Nf_5_Kx_16_Kl_16_h0_256_l_16_H_8_k_64_m_32_e_32_drop_0.4_0.4"
+    OUTPUT_FILE = "batch_samples_100rows_fast_xrd.csv"
     
     print("开始高速批量采样...")
     print(f"CSV文件: {CSV_PATH}")

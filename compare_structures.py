@@ -173,7 +173,7 @@ def save_reference_cif(reference_structure, material_id, output_dir="reference_s
 
 def main():
     # 文件路径
-    csv_path = "/root/autodl-tmp/CrystalFormer/test_output/batch_structures.csv"
+    csv_path = "/root/autodl-tmp/CrystalFormer/xrd_test_output/batch_structures.csv"
     
     # 检查文件是否存在
     if not os.path.exists(csv_path):

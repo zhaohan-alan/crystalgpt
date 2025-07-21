@@ -41,13 +41,16 @@ def shuffle(key, data):
     """
     shuffle data along batch dimension
     """
-    if len(data) == 6:  # composition features included
+    idx = jax.random.permutation(key, jnp.arange(len(data[1])))  # use L (data[1]) length for indexing
+    
+    if len(data) == 7:  # composition + XRD features
+        G, L, XYZ, A, W, C, X_xrd = data
+        return G[idx], L[idx], XYZ[idx], A[idx], W[idx], C[idx], X_xrd[idx]
+    elif len(data) == 6:  # composition features only
         G, L, XYZ, A, W, C = data
-        idx = jax.random.permutation(key, jnp.arange(len(L)))
         return G[idx], L[idx], XYZ[idx], A[idx], W[idx], C[idx]
-    else:  # no composition features
+    else:  # basic data only (5 elements)
         G, L, XYZ, A, W = data
-        idx = jax.random.permutation(key, jnp.arange(len(L)))
         return G[idx], L[idx], XYZ[idx], A[idx], W[idx]
     
 def process_one(cif, atom_types, wyck_types, n_max, tol=0.01):
@@ -130,9 +133,9 @@ def process_one(cif, atom_types, wyck_types, n_max, tol=0.01):
 
     return g, l, fc, aa, ww 
 
-def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1, use_comp_feature=False, comp_feature_dim=256):
+def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1, use_comp_feature=False, comp_feature_dim=256, use_xrd_feature=False, xrd_feature_dim=1080):
     """
-    Read cif strings from csv file and convert them to G, L, XYZ, A, W, and optionally composition features
+    Read cif strings from csv file and convert them to G, L, XYZ, A, W, and optionally composition features and XRD features
     Note that cif strings must be in the column 'cif'
 
     Args:
@@ -143,6 +146,8 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1, us
       num_workers: number of workers for multiprocessing
       use_comp_feature: whether to load composition features from CSV
       comp_feature_dim: dimension of composition features (default 256)
+      use_xrd_feature: whether to load XRD features from CSV
+      xrd_feature_dim: dimension of XRD features (default 1080)
 
     Returns:
       G: space group number
@@ -151,6 +156,7 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1, us
       A: atom types
       W: wyckoff letters
       C: composition features (if use_comp_feature=True)
+      X_xrd: XRD features (if use_xrd_feature=True)
     """
     if csv_file.endswith('.lmdb'):
         import lmdb
@@ -177,7 +183,7 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1, us
 
     data = pd.read_csv(csv_file)
     #只取前100行
-    # data = data.head(100)
+    # data = data.head(270)
     try: cif_strings = data['cif']
     except: cif_strings = data['structure']
 
@@ -189,6 +195,24 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1, us
         comp_features = data[comp_columns].values
         comp_features = jnp.array(comp_features, dtype=jnp.float32)
         print(f'Loaded composition features with shape: {comp_features.shape}')
+
+    # Load XRD features if requested
+    xrd_features = None
+    if use_xrd_feature:
+        if 'xrd_data' not in data.columns:
+            raise ValueError("XRD feature requested but 'xrd_data' column not found in CSV")
+        
+        # Parse XRD data from comma-separated strings
+        xrd_strings = data['xrd_data'].values
+        xrd_list = []
+        for xrd_str in xrd_strings:
+            xrd_values = [float(x) for x in xrd_str.split(',')]
+            if len(xrd_values) != xrd_feature_dim:
+                raise ValueError(f"Expected XRD feature dimension {xrd_feature_dim}, got {len(xrd_values)}")
+            xrd_list.append(xrd_values)
+        
+        xrd_features = jnp.array(xrd_list, dtype=jnp.float32)
+        print(f'Loaded XRD features with shape: {xrd_features.shape}')
 
     p = multiprocessing.Pool(num_workers)
     partial_process_one = partial(process_one, atom_types=atom_types, wyck_types=wyck_types, n_max=n_max)
@@ -206,10 +230,14 @@ def GLXYZAW_from_file(csv_file, atom_types, wyck_types, n_max, num_workers=1, us
 
     A, XYZ = sort_atoms(W, A, XYZ)
     
+    # Return appropriate data based on feature usage
+    result = [G, L, XYZ, A, W]
     if use_comp_feature:
-        return G, L, XYZ, A, W, comp_features
-    else:
-        return G, L, XYZ, A, W
+        result.append(comp_features)
+    if use_xrd_feature:
+        result.append(xrd_features)
+    
+    return tuple(result)
 
 def GLXA_to_structure_single(G, L, X, A):
     """

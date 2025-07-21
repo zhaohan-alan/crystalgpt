@@ -102,6 +102,8 @@ group.add_argument('--use_comp_feature', action='store_true', help='Whether to u
 group.add_argument('--comp_feature_dim', type=int, default=256, help='Dimension of composition features')
 group.add_argument('--comp_csv_path', type=str, default='/root/autodl-tmp/CrystalFormer/data/test_comp_cleaned.csv', help='Path to CSV file containing composition features')
 group.add_argument('--comp_data_index', type=int, default=0, help='Which row to read from CSV for composition features (0-indexed)')
+group.add_argument('--use_xrd_feature', action='store_true', help='Whether to use XRD features from CSV')
+group.add_argument('--xrd_feature_dim', type=int, default=1080, help='Dimension of XRD features')
 
 group = parser.add_argument_group('loss parameters')
 group.add_argument("--lamb_a", type=float, default=1.0, help="weight for the a part relative to fc")
@@ -143,17 +145,30 @@ if args.num_io_process > num_cpu:
     args.num_io_process = num_cpu
 
 
+################### Model #############################
+params, transformer = make_transformer(key, args.Nf, args.Kx, args.Kl, args.n_max, 
+                                      args.h0_size, 
+                                      args.transformer_layers, args.num_heads, 
+                                      args.key_size, args.model_size, args.embed_size, 
+                                      args.atom_types, args.wyck_types,
+                                      args.dropout_rate, args.attn_dropout,
+                                      use_comp_feature=args.use_comp_feature,
+                                      comp_feature_dim=args.comp_feature_dim,
+                                      use_xrd_feature=args.use_xrd_feature,
+                                      xrd_feature_dim=args.xrd_feature_dim)
+transformer_name = 'Nf_%d_Kx_%d_Kl_%d_h0_%d_l_%d_H_%d_k_%d_m_%d_e_%d_drop_%g_%g'%(args.Nf, args.Kx, args.Kl, args.h0_size, args.transformer_layers, args.num_heads, args.key_size, args.model_size, args.embed_size, args.dropout_rate, args.attn_dropout)
+
+print ("# of transformer params", ravel_pytree(params)[0].size) 
+
 ################### Data #############################
 if args.optimizer != "none":
-    if args.use_comp_feature:
-        train_data = GLXYZAW_from_file(args.train_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process, 
-                                     use_comp_feature=True, comp_feature_dim=args.comp_feature_dim)
-        valid_data = GLXYZAW_from_file(args.valid_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process,
-                                     use_comp_feature=True, comp_feature_dim=args.comp_feature_dim)
-
-    else:
-        train_data = GLXYZAW_from_file(args.train_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
-        valid_data = GLXYZAW_from_file(args.valid_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process)
+    # Load training and validation data with optional features
+    train_data = GLXYZAW_from_file(args.train_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process, 
+                                 use_comp_feature=args.use_comp_feature, comp_feature_dim=args.comp_feature_dim,
+                                 use_xrd_feature=args.use_xrd_feature, xrd_feature_dim=args.xrd_feature_dim)
+    valid_data = GLXYZAW_from_file(args.valid_path, args.atom_types, args.wyck_types, args.n_max, args.num_io_process,
+                                 use_comp_feature=args.use_comp_feature, comp_feature_dim=args.comp_feature_dim,
+                                 use_xrd_feature=args.use_xrd_feature, xrd_feature_dim=args.xrd_feature_dim)
 
 else:
     assert (args.spacegroup is not None) # for inference we need to specify space group
@@ -242,22 +257,9 @@ else:
             composition_features = jnp.zeros(args.comp_feature_dim, dtype=jnp.float32)
             mp_id = "no-mp-id"
 
-    ################### Model #############################
-    params, transformer = make_transformer(key, args.Nf, args.Kx, args.Kl, args.n_max, 
-                                          args.h0_size, 
-                                          args.transformer_layers, args.num_heads, 
-                                          args.key_size, args.model_size, args.embed_size, 
-                                          args.atom_types, args.wyck_types,
-                                          args.dropout_rate, args.attn_dropout,
-                                          use_comp_feature=args.use_comp_feature,
-                                          comp_feature_dim=args.comp_feature_dim)
-transformer_name = 'Nf_%d_Kx_%d_Kl_%d_h0_%d_l_%d_H_%d_k_%d_m_%d_e_%d_drop_%g_%g'%(args.Nf, args.Kx, args.Kl, args.h0_size, args.transformer_layers, args.num_heads, args.key_size, args.model_size, args.embed_size, args.dropout_rate, args.attn_dropout)
-
-print ("# of transformer params", ravel_pytree(params)[0].size) 
-
 ################### Train #############################
 
-loss_fn, logp_fn = make_loss_fn(args.n_max, args.atom_types, args.wyck_types, args.Kx, args.Kl, transformer, args.lamb_a, args.lamb_w, args.lamb_l, args.use_comp_feature)
+loss_fn, logp_fn = make_loss_fn(args.n_max, args.atom_types, args.wyck_types, args.Kx, args.Kl, transformer, args.lamb_a, args.lamb_w, args.lamb_l, args.use_comp_feature, args.use_xrd_feature)
 
 print("\n========== Prepare logs ==========")
 if args.optimizer != "none" or args.restore_path is None:
