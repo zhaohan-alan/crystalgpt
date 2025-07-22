@@ -120,7 +120,7 @@ class BatchSampler:
                 self.comp_feature_dim = 256
                 
                 # XRD特征参数
-                self.use_xrd_feature = True
+                self.use_xrd_feature = False
                 self.xrd_feature_dim = 1080
         
         return Args()
@@ -320,8 +320,8 @@ def main():
     CSV_PATH = "data/test_comp_cleaned_xrd.csv"  # 使用包含XRD数据的文件
     NUM_ROWS = 1000
     SAMPLES_PER_ROW = 30
-    RESTORE_PATH = "xrd_test_output/adam_bs_90_lr_0.0005_decay_0_clip_1_A_119_W_28_N_21_a_1_w_1_l_1_Nf_5_Kx_16_Kl_16_h0_256_l_16_H_8_k_64_m_32_e_32_drop_0.4_0.4"
-    OUTPUT_FILE = "xrd_test_output/batch_samples_1000rows_fast_xrd.csv"
+    RESTORE_PATH = "test_output/adam_bs_90_lr_0.0005_decay_0_clip_1_A_119_W_28_N_21_a_1_w_1_l_1_Nf_5_Kx_16_Kl_16_h0_256_l_16_H_8_k_64_m_32_e_32_drop_0.4_0.4"
+    OUTPUT_FILE = "test_output/batch_samples_1000rows_fast_comp_only.csv"
     
     print("开始高速批量采样...")
     print(f"CSV文件: {CSV_PATH}")

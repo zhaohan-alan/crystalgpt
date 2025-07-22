@@ -6,7 +6,7 @@ sample.sh
     NUM_ROWS = 100
     SAMPLES_PER_ROW = 30
     改一下输出路径和这些参数
-
+    注意use_comp_feature和use_xrd_feature参数
 第二步
 拿到输出的 batch_samples_100rows_fast.csv
 然后运行
